@@ -64,7 +64,7 @@ if data:
     # 7. 地圖顯示
     st.subheader("🗺️ 觀測站地理位置")
     map_df = pd.DataFrame([city_coords]).rename(columns={"lat": "latitude", "lon": "longitude"})
-    st.map(map_data = map_df)
+    st.map(map_df)
 
     # 8. 原始資料檢視
     with st.expander("🔍 檢視 168 小時原始數據預測表"):
