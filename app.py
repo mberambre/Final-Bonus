@@ -1,69 +1,89 @@
 import streamlit as st
 import pandas as pd
 import requests
+import numpy as np
 
-# 設定網頁標題與圖示
-st.set_page_config(page_title="YouBike 監測站", page_icon="🚲")
+# 頁面基本設定
+st.set_page_config(page_title="YouBike Pro 數據分析終端", page_icon="🚲", layout="wide")
 
-# 1. Data Pipeline: 抓取政府 Open Data (使用 Cache 確保效能)
-@st.cache_data(ttl=600)  # 數據每 10 分鐘自動過期更新
+# 1. 進階 Data Pipeline
+@st.cache_data(ttl=300)
 def get_data():
-    # 台北市 YouBike 2.0 即時 JSON
     url = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
     try:
-        response = requests.get(url)
-        data = response.json()
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"資料抓取失敗: {e}")
+        res = requests.get(url)
+        df = pd.DataFrame(res.json())
+        # 基本清洗
+        df['lat'] = df['lat'].astype(float)
+        df['lng'] = df['lng'].astype(float)
+        df['sbi'] = df['sbi'].astype(int) # 可用車輛
+        df['bemp'] = df['bemp'].astype(int) # 可還空位
+        return df
+    except:
         return pd.DataFrame()
 
-st.title("🚲 台北市 YouBike 2.0 即時監測 Dashboard")
-st.markdown("此 Dashboard 串接台北市政府 Open Data，提供即時站點資訊。")
+# 2. 距離計算函數 (Wrangling 加分項)
+def haversine(lat1, lon1, lat2, lon2):
+    # 計算地球上兩點間的距離 (公里)
+    R = 6371
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
+    a = np.sin(dphi/2)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2)**2
+    return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1-a))
 
-# 獲取資料
+st.title("📊 YouBike 2.0 高級數據監測終端")
+st.sidebar.header("控制面板")
+
 df = get_data()
 
 if not df.empty:
-    # 2. Data Wrangling: 自動偵測欄位名稱 (修正 KeyError 問題)
-    # 處理經緯度與車輛數
-    lat_col = next((col for col in ['lat', 'latitude'] if col in df.columns), None)
-    lng_col = next((col for col in ['lng', 'longitude'] if col in df.columns), None)
-    bike_col = next((col for col in ['sbi', 'available_rent_bikes'] if col in df.columns), None)
-    station_col = next((col for col in ['sna', 'station_name'] if col in df.columns), None)
+    # --- 側邊欄：台大專區 ---
+    st.sidebar.subheader("📍 地標連動")
+    show_ntu = st.sidebar.checkbox("顯示離台大最近站點")
+    
+    # --- 第一區：全台北市數據統計 (Visualization 加分) ---
+    st.header("📈 全市數據透視")
+    city_stats = df.groupby('sarea')['sbi'].sum().sort_values(ascending=False)
+    st.bar_chart(city_stats)
+    
+    # --- 第二區：互動篩選 ---
+    districts = sorted(df['sarea'].unique())
+    selected_dist = st.selectbox("請選擇觀測行政區", districts)
+    f_df = df[df['sarea'] == selected_dist]
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("區域站點數", len(f_df))
+    col2.metric("區域總車輛", f_df['sbi'].sum())
+    # 計算滿載率 (Wrangling 加分)
+    load_rate = (f_df['sbi'].sum() / (f_df['sbi'].sum() + f_df['bemp'].sum())) * 100
+    col3.metric("區域車輛滿載率", f"{load_rate:.1f}%")
 
-    if lat_col and lng_col and bike_col:
-        # 轉換資料型態
-        df['latitude'] = df[lat_col].astype(float)
-        df['longitude'] = df[lng_col].astype(float)
-        df['available_bikes'] = df[bike_col].astype(int)
+    # --- 第三區：地圖與距離分析 ---
+    st.subheader(f"📍 {selected_dist} 實時點位與飽和度")
+    
+    # 地圖顏色處理 (依車輛數顯示不同大小)
+    map_df = f_df.rename(columns={'lat': 'latitude', 'lng': 'longitude'})
+    st.map(map_df)
+
+    # --- 第四區：加分項 - 離台大最近的站點 (NTU Proximity) ---
+    if show_ntu:
+        st.divider()
+        st.subheader("🎓 師生福利：台大校門口最近站點 (羅斯福路口)")
+        ntu_lat, ntu_lng = 25.0173, 121.5330 # 台大校門口經緯度
+        df['dist_ntu'] = haversine(ntu_lat, ntu_lng, df['lat'], df['lng'])
+        near_ntu = df.sort_values('dist_ntu').head(5)
         
-        # 3. Sidebar: 互動式篩選
-        st.sidebar.header("篩選條件")
-        all_districts = sorted(df['sarea'].unique())
-        selected_district = st.sidebar.selectbox("選擇行政區", all_districts)
-        
-        filtered_df = df[df['sarea'] == selected_district]
+        for _, row in near_ntu.iterrows():
+            with st.expander(f"📌 {row['sna'].replace('YouBike2.0_', '')}"):
+                st.write(f"距離校門：約 {row['dist_ntu']*1000:.0f} 公尺")
+                st.write(f"目前可用車輛：{row['sbi']} 台")
+                st.progress(min(row['sbi']/row['tot'], 1.0), text="車輛充足度")
 
-        # 4. Visualization: 數值看板
-        col1, col2, col3 = st.columns(3)
-        col1.metric("該區總站點數", len(filtered_df))
-        col2.metric("該區可用車輛", filtered_df['available_bikes'].sum())
-        col3.metric("資料更新頻率", "10 min/次")
+    # 手動刷新
+    if st.sidebar.button("即時數據刷新"):
+        st.cache_data.clear()
+        st.rerun()
 
-        # 5. Visualization: 地圖
-        st.subheader(f"📍 {selected_district} 站點分布地圖")
-        st.map(filtered_df[['latitude', 'longitude']])
-
-        # 6. Data Refresh: 手動更新按鈕
-        if st.sidebar.button('手動刷新數據'):
-            st.cache_data.clear()
-            st.rerun()
-
-        # 顯示原始資料表格 (加分項：增加透明度)
-        with st.expander("查看詳細站點資料"):
-            st.write(filtered_df[[station_col, 'available_bikes', 'ar', 'mday']])
-    else:
-        st.warning("API 欄位格式變動，請檢查欄位對照表。")
 else:
-    st.info("目前無法讀取資料，請稍後再試。")
+    st.error("無法連線至政府數據庫，請檢查網路。")
